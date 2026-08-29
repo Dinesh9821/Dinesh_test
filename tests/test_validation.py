@@ -64,7 +64,8 @@ def test_validate_device_type_unknown_vendor() -> None:
 def test_normalize_platform_meraki_from_api_key() -> None:
     req = DeviceRequest(api_key="xxxxx", device_name="SW-001")
     assert is_meraki(req) is True
-    assert normalize_platform(req.device_type, req.vendor) == "meraki"
+    assert normalize_platform("meraki_switch", "meraki") == "meraki"
+    assert normalize_platform(None, "meraki") == "meraki"
 
 
 def test_troubleshoot_requires_target_ip() -> None:

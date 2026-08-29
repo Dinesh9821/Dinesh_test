@@ -862,10 +862,12 @@ def normalize_platform(device_type: Optional[str], vendor: Optional[str] = None)
         return dtype
     if vend == Vendor.VIPTELA.value:
         return "cisco_sdwan"
-    if vend == Vendor.CISCO.value or (not dtype and vend in {"", "cisco"}):
-        return "cisco_ios"
+    if vend == Vendor.CISCO.value:
+        return dtype or "cisco_ios"
     if dtype:
         return dtype
+    if not vend:
+        return "cisco_ios"
     raise InvalidDeviceTypeError(device_type or vendor or "unknown")
 
 
@@ -2020,8 +2022,9 @@ _EXECUTOR: Optional[ThreadPoolExecutor] = None
 
 
 def get_executor() -> ThreadPoolExecutor:
+    """Return a live thread pool, recreating it after lifespan shutdown (e.g. tests)."""
     global _EXECUTOR
-    if _EXECUTOR is None:
+    if _EXECUTOR is None or getattr(_EXECUTOR, "_shutdown", False):
         _EXECUTOR = ThreadPoolExecutor(
             max_workers=get_settings().network_max_workers,
             thread_name_prefix="netops",
@@ -2476,102 +2479,106 @@ def _section(collected: dict[str, Any], key: str, inner: Optional[str] = None) -
 async def device_summary(request: Request, body: DeviceRequest) -> JSONResponse:
     started = time.perf_counter()
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
-    connector = get_device_connector(body)
-    if isinstance(connector, MerakiAPIDevice):
-        ops = ["device_status", "devices", "uplinks", "clients"]
-        collected = await run_blocking(connector.execute_many, ops)
+    try:
+        connector = get_device_connector(body)
+        if isinstance(connector, MerakiAPIDevice):
+            ops = ["device_status", "devices", "uplinks", "clients"]
+            collected = await run_blocking(connector.execute_many, ops)
+            elapsed = time.perf_counter() - started
+            payload = {
+                "status": "success",
+                "device": device_info_from(connector.device).model_dump(),
+                "health": {"status": "unknown", "cpu": None, "memory": None},
+                "interfaces": collected.get("devices", {}).get("data"),
+                "wan": collected.get("uplinks", {}).get("data"),
+                "arp": [],
+                "mac": [],
+                "routing": [],
+                "bgp": {},
+                "ospf": {},
+                "vpn": [],
+                "vlans": [],
+                "neighbors": [],
+                "environment": {},
+                "logging": [],
+                "clients": collected.get("clients", {}).get("data"),
+                "device_status": collected.get("device_status", {}).get("data"),
+                "metadata": {
+                    "timestamp": utc_now(),
+                    "execution_time": round(elapsed, 3),
+                    "request_id": request_id,
+                },
+            }
+            return JSONResponse(payload)
+
+        collected = await run_blocking(connector.execute_many, SUMMARY_OPERATIONS)
         elapsed = time.perf_counter() - started
+        version = (collected.get("version") or {}).get("data") or {}
+        cpu = (collected.get("cpu") or {}).get("data") or {}
+        mem = (collected.get("memory") or {}).get("data") or {}
+        cpu_val = cpu.get("cpu") if isinstance(cpu, dict) else None
+        mem_val = mem.get("memory") if isinstance(mem, dict) else None
+        health_status = "healthy"
+        if isinstance(cpu_val, int) and cpu_val >= 90:
+            health_status = "degraded"
+        if isinstance(mem_val, int) and mem_val >= 90:
+            health_status = "degraded"
+
+        log_operation(
+            request_id=request_id,
+            endpoint="/api/v1/device/summary",
+            device=body.device_name,
+            device_ip=body.login_ip,
+            operation="device_summary",
+            execution_time=elapsed,
+            status="success",
+        )
         payload = {
             "status": "success",
             "device": device_info_from(connector.device).model_dump(),
-            "health": {"status": "unknown", "cpu": None, "memory": None},
-            "interfaces": collected.get("devices", {}).get("data"),
-            "wan": collected.get("uplinks", {}).get("data"),
-            "arp": [],
-            "mac": [],
-            "routing": [],
-            "bgp": {},
-            "ospf": {},
-            "vpn": [],
-            "vlans": [],
-            "neighbors": [],
-            "environment": {},
-            "logging": [],
-            "clients": collected.get("clients", {}).get("data"),
-            "device_status": collected.get("device_status", {}).get("data"),
+            "health": {"status": health_status, "cpu": cpu_val, "memory": mem_val},
+            "facts": {
+                "hostname": version.get("hostname") if isinstance(version, dict) else None,
+                "model": version.get("model") if isinstance(version, dict) else None,
+                "ios_version": version.get("ios_version") if isinstance(version, dict) else None,
+                "serial_number": version.get("serial_number") if isinstance(version, dict) else None,
+                "uptime": version.get("uptime") if isinstance(version, dict) else None,
+            },
+            "interfaces": _section(collected, "interfaces", "interfaces"),
+            "wan": _section(collected, "wan_sdwan_interface"),
+            "arp": _section(collected, "arp", "entries"),
+            "mac": _section(collected, "mac", "entries"),
+            "routing": _section(collected, "routing", "routes"),
+            "bgp": _section(collected, "bgp_summary"),
+            "ospf": _section(collected, "ospf_neighbors"),
+            "vpn": _section(collected, "vpn_session", "sessions"),
+            "vlans": _section(collected, "vlans", "vlans"),
+            "neighbors": {
+                "cdp": _section(collected, "cdp", "neighbors"),
+                "lldp": _section(collected, "lldp", "neighbors"),
+            },
+            "environment": _section(collected, "environment"),
+            "logging": _section(collected, "logging"),
+            "raw_output": {
+                k: v.get("raw_output")
+                for k, v in collected.items()
+                if not str(k).startswith("_") and isinstance(v, dict)
+            },
             "metadata": {
                 "timestamp": utc_now(),
                 "execution_time": round(elapsed, 3),
                 "request_id": request_id,
+                "commands": [
+                    v.get("command")
+                    for v in collected.values()
+                    if isinstance(v, dict) and v.get("command")
+                ],
             },
         }
         return JSONResponse(payload)
+    except NetworkOpsError as exc:
+        return JSONResponse(error_payload(exc, request_id), status_code=exc.http_status)
 
-    collected = await run_blocking(connector.execute_many, SUMMARY_OPERATIONS)
-    elapsed = time.perf_counter() - started
-    version = (collected.get("version") or {}).get("data") or {}
-    cpu = (collected.get("cpu") or {}).get("data") or {}
-    mem = (collected.get("memory") or {}).get("data") or {}
-    cpu_val = cpu.get("cpu") if isinstance(cpu, dict) else None
-    mem_val = mem.get("memory") if isinstance(mem, dict) else None
-    health_status = "healthy"
-    if isinstance(cpu_val, int) and cpu_val >= 90:
-        health_status = "degraded"
-    if isinstance(mem_val, int) and mem_val >= 90:
-        health_status = "degraded"
-
-    log_operation(
-        request_id=request_id,
-        endpoint="/api/v1/device/summary",
-        device=body.device_name,
-        device_ip=body.login_ip,
-        operation="device_summary",
-        execution_time=elapsed,
-        status="success",
-    )
-    payload = {
-        "status": "success",
-        "device": device_info_from(connector.device).model_dump(),
-        "health": {"status": health_status, "cpu": cpu_val, "memory": mem_val},
-        "facts": {
-            "hostname": version.get("hostname") if isinstance(version, dict) else None,
-            "model": version.get("model") if isinstance(version, dict) else None,
-            "ios_version": version.get("ios_version") if isinstance(version, dict) else None,
-            "serial_number": version.get("serial_number") if isinstance(version, dict) else None,
-            "uptime": version.get("uptime") if isinstance(version, dict) else None,
-        },
-        "interfaces": _section(collected, "interfaces", "interfaces"),
-        "wan": _section(collected, "wan_sdwan_interface"),
-        "arp": _section(collected, "arp", "entries"),
-        "mac": _section(collected, "mac", "entries"),
-        "routing": _section(collected, "routing", "routes"),
-        "bgp": _section(collected, "bgp_summary"),
-        "ospf": _section(collected, "ospf_neighbors"),
-        "vpn": _section(collected, "vpn_session", "sessions"),
-        "vlans": _section(collected, "vlans", "vlans"),
-        "neighbors": {
-            "cdp": _section(collected, "cdp", "neighbors"),
-            "lldp": _section(collected, "lldp", "neighbors"),
-        },
-        "environment": _section(collected, "environment"),
-        "logging": _section(collected, "logging"),
-        "raw_output": {
-            k: v.get("raw_output")
-            for k, v in collected.items()
-            if not str(k).startswith("_") and isinstance(v, dict)
-        },
-        "metadata": {
-            "timestamp": utc_now(),
-            "execution_time": round(elapsed, 3),
-            "request_id": request_id,
-            "commands": [
-                v.get("command")
-                for v in collected.values()
-                if isinstance(v, dict) and v.get("command")
-            ],
-        },
-    }
-    return JSONResponse(payload)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Site Topology · ARP Troubleshoot</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>
+        <h1>Site Fabric</h1>
+        <p>Dynamic topology · LAN/WAN ARP path</p>
+      </div>
+    </div>
+    <nav>
+      <button class="tab active" data-view="topo">Site diagram</button>
+      <button class="tab" data-view="arp">User / ARP</button>
+    </nav>
+  </header>
+
+  <section id="view-topo" class="workspace">
+    <aside class="panel">
+      <h2>Seed device</h2>
+      <p class="hint">Any switch or router in the site. Discovery walks CDP/LLDP/CAPWAP/Meraki and stops at Internet.</p>
+      <label>Hostname or mgmt IP</label>
+      <input id="seed" value="SW-MUM-ACC-01" />
+      <button class="primary" id="btn-topo">Discover site</button>
+      <div id="topo-summary" class="summary"></div>
+      <h2>Legend</h2>
+      <div id="legend" class="legend"></div>
+    </aside>
+    <div id="cy-topo" class="cy"></div>
+    <aside class="panel details" id="topo-details">
+      <h2>Selection</h2>
+      <pre id="topo-json">Click a node or link</pre>
+    </aside>
+  </section>
+
+  <section id="view-arp" class="workspace hidden">
+    <aside class="panel">
+      <h2>Find a user</h2>
+      <p class="hint">Search the way a NOC engineer would: IP, MAC, username, or hostname. Response splits LAN vs WAN so you can isolate switching/RF from DIA/NAT.</p>
+      <label>IP</label>
+      <input id="q-ip" placeholder="10.20.10.45" />
+      <label>MAC</label>
+      <input id="q-mac" placeholder="aa:bb:cc:11:22:45" />
+      <label>Username</label>
+      <input id="q-user" placeholder="dinesh.velapure" />
+      <label>Hostname</label>
+      <input id="q-host" placeholder="LAPTOP-DINESH" />
+      <div class="chips">
+        <button class="chip" data-ip="10.20.10.45">Wired user</button>
+        <button class="chip" data-ip="10.40.10.88">Cisco Wi-Fi</button>
+        <button class="chip" data-ip="10.40.10.89">Meraki guest</button>
+        <button class="chip" data-ip="10.50.10.12">IoT camera</button>
+      </div>
+      <button class="primary" id="btn-arp">Trace path</button>
+      <div id="verdict"></div>
+      <ul id="findings"></ul>
+    </aside>
+    <div id="cy-arp" class="cy"></div>
+    <aside class="panel details">
+      <h2>LAN</h2>
+      <pre id="lan-json"></pre>
+      <h2>WAN</h2>
+      <pre id="wan-json"></pre>
+      <h2>Engineer notes</h2>
+      <ul id="notes"></ul>
+    </aside>
+  </section>
+  <script src="/static/app.js"></script>
+</body>
+</html>
